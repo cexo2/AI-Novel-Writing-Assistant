@@ -193,6 +193,16 @@ export const volumeSyncSchema = z.object({
   volumes: z.array(volumeSchema).min(1),
   preserveContent: z.boolean().optional(),
   applyDeletes: z.boolean().optional(),
+  syncMode: z.enum(["conservative", "rebuild_target_volume"]).optional(),
+  targetVolumeId: z.string().trim().min(1).optional(),
+}).superRefine((value, ctx) => {
+  if (value.syncMode === "rebuild_target_volume" && !value.targetVolumeId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["targetVolumeId"],
+      message: "\u91cd\u5efa\u672c\u5377\u7ae0\u8282\u540c\u6b65\u65f6\u5fc5\u987b\u63d0\u4f9b\u76ee\u6807\u5377\u3002",
+    });
+  }
 });
 
 export const chapterSchema = z.object({

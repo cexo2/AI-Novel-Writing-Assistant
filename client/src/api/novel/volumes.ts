@@ -125,6 +125,8 @@ export async function syncNovelVolumeChapters(
     volumes: VolumePlan[];
     preserveContent?: boolean;
     applyDeletes?: boolean;
+    syncMode?: "conservative" | "rebuild_target_volume";
+    targetVolumeId?: string;
   },
 ) {
   const { data } = await apiClient.post<ApiResponse<VolumeSyncPreview>>(`/novels/${id}/volumes/sync-chapters`, payload);

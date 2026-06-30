@@ -361,6 +361,14 @@ export class DefaultNovelApplicationServices {
   }
 
   syncVolumeChapters(...args: Parameters<NovelVolumeService["syncVolumeChapters"]>) {
+    const [novelId, input] = args;
+    if (input?.syncMode === "rebuild_target_volume" && input.targetVolumeId) {
+      return this.createNovelSnapshot(
+        novelId,
+        "manual",
+        `before-volume-rebuild-${input.targetVolumeId}-${Date.now()}`,
+      ).then(() => this.volumeService.syncVolumeChapters(...args));
+    }
     return this.volumeService.syncVolumeChapters(...args);
   }
 

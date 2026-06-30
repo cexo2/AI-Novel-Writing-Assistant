@@ -117,6 +117,8 @@ export interface VolumeSyncInput {
   volumes: unknown;
   preserveContent?: boolean;
   applyDeletes?: boolean;
+  syncMode?: "conservative" | "rebuild_target_volume";
+  targetVolumeId?: string;
   executionContractChapterRange?: {
     startOrder: number;
     endOrder: number;

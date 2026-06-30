@@ -182,24 +182,52 @@ export function useNovelEditMutations({
       volumes: volumeDocument.volumes,
       preserveContent: options.preserveContent,
       applyDeletes: options.applyDeletes,
+      syncMode: "conservative",
     }),
     onSuccess: async (response) => {
       const preview = response.data;
       setStructuredMessage(
-        `连接修复完成：新增 ${preview?.createCount ?? 0}，更新 ${preview?.updateCount ?? 0}，删除 ${preview?.deleteCount ?? 0}。`,
+        "\u8fde\u63a5\u4fee\u590d\u5b8c\u6210\uff1a\u65b0\u589e" + (preview?.createCount ?? 0) + "\uff0c\u66f4\u65b0" + (preview?.updateCount ?? 0) + "\uff0c\u5220\u9664" + (preview?.deleteCount ?? 0) + "\u3002",
       );
       await syncNovelWorkflowStageSilently({
         novelId: id,
         stage: "structured_outline",
-        itemLabel: "卷级拆章已连接到章节执行",
+        itemLabel: "\u5377\u7ea7\u62c6\u7ae0\u5df2\u8fde\u63a5\u5230\u7ae0\u8282\u6267\u884c",
         checkpointType: "chapter_batch_ready",
-        checkpointSummary: "章节列表、任务单和执行入口已准备好，可继续进入章节执行。",
+        checkpointSummary: "\u7ae0\u8282\u5217\u8868\u3001\u4efb\u52a1\u5355\u548c\u6267\u884c\u5165\u53e3\u5df2\u51c6\u5907\u597d\uff0c\u53ef\u7ee7\u7eed\u8fdb\u5165\u7ae0\u8282\u6267\u884c\u3002",
         status: "waiting_approval",
       });
       await invalidateNovelDetail();
     },
     onError: (error) => {
-      const message = error instanceof Error ? error.message : "章节同步失败。";
+      const message = error instanceof Error ? error.message : "\u7ae0\u8282\u540c\u6b65\u5931\u8d25\u3002";
+      setStructuredMessage(message);
+    },
+  });
+
+  const rebuildVolumeSyncMutation = useMutation({
+    mutationFn: (targetVolumeId: string) => syncNovelVolumeChapters(id, {
+      volumes: volumeDocument.volumes,
+      syncMode: "rebuild_target_volume",
+      targetVolumeId,
+    }),
+    onSuccess: async (response, targetVolumeId) => {
+      const preview = response.data;
+      setStructuredMessage(
+        "\u672c\u5377\u91cd\u5efa\u5b8c\u6210\uff1a\u5f52\u6863\u66ff\u6362 " + (preview?.deleteCount ?? 0) + " \u4e2a\u65e7\u7ae0\u8282\uff0c\u91cd\u5efa " + (preview?.createCount ?? 0) + " \u4e2a\u65b0\u7ae0\u8282\u3002",
+      );
+      await syncNovelWorkflowStageSilently({
+        novelId: id,
+        stage: "structured_outline",
+        itemLabel: "\u672c\u5377\u7ae0\u8282\u540c\u6b65\u5df2\u91cd\u5efa",
+        checkpointType: "chapter_batch_ready",
+        checkpointSummary: "\u5df2\u6309\u5f53\u524d\u62c6\u7ae0\u7ed3\u679c\u91cd\u5efa\u76ee\u6807\u5377 " + targetVolumeId + " \u7684\u6267\u884c\u7ae0\u8282\u6620\u5c04\u3002",
+        status: "waiting_approval",
+      });
+      await invalidateNovelDetail();
+    },
+    onError: (error) => {
+      const message = error instanceof Error ? error.message : "\u672c\u5377\u7ae0\u8282\u91cd\u5efa\u5931\u8d25\u3002";
       setStructuredMessage(message);
     },
   });
@@ -305,6 +333,7 @@ export function useNovelEditMutations({
     optimizeOutlineMutation,
     optimizeStructuredMutation,
     syncStructuredChaptersMutation,
+    rebuildVolumeSyncMutation,
     createChapterMutation,
     runPipelineMutation,
     reviewMutation,

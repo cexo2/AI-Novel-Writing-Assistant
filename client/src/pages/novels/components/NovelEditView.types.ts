@@ -275,7 +275,9 @@ export interface StructuredTabViewProps extends Omit<
   syncOptions: StructuredSyncOptions;
   onSyncOptionsChange: (patch: Partial<StructuredSyncOptions>) => void;
   onApplySync: (options: StructuredSyncOptions) => void;
+  onRebuildVolumeSync: (volumeId: string) => void;
   isApplyingSync: boolean;
+  isRebuildingVolumeSync: boolean;
   syncMessage: string;
   chapters: ExistingOutlineChapter[];
   onChapterFieldChange: (
