@@ -90,7 +90,9 @@ export default function StructuredOutlineWorkspace(props: StructuredTabViewProps
     syncOptions,
     onSyncOptionsChange,
     onApplySync,
+    onRebuildVolumeSync,
     isApplyingSync,
+    isRebuildingVolumeSync,
     syncMessage,
     onChapterFieldChange,
     onChapterNumberChange,
@@ -461,9 +463,20 @@ export default function StructuredOutlineWorkspace(props: StructuredTabViewProps
                       <Button size="sm" variant="outline" onClick={() => onApplyBatch({ conflictLevel: 60 })}>统一冲突等级 60</Button>
                       <Button size="sm" variant="outline" onClick={() => onApplyBatch({ targetWordCount: 2500 })}>统一字数 2500</Button>
                       <AiButton size="sm" onClick={() => onApplyBatch({ generateTaskSheet: true })}>批量补任务单</AiButton>
-                      <Button onClick={() => onApplySync(syncOptions)} disabled={isApplyingSync}>
-                        {isApplyingSync ? "修复中..." : "修复章节连接"}
+                      <Button onClick={() => onApplySync(syncOptions)} disabled={isApplyingSync || isRebuildingVolumeSync}>
+                        {isApplyingSync ? "\u4fee\u590d\u4e2d..." : "\u4fee\u590d\u7ae0\u8282\u8fde\u63a5"}
                       </Button>
+                      <Button
+                        variant="secondary"
+                        onClick={() => selectedVolume && onRebuildVolumeSync(selectedVolume.id)}
+                        disabled={!selectedVolume || isApplyingSync || isRebuildingVolumeSync}
+                      >
+                        {isRebuildingVolumeSync ? "\u91cd\u5efa\u4e2d..." : "\u91cd\u5efa\u672c\u5377\u7ae0\u8282\u540c\u6b65"}
+                      </Button>
+                    </div>
+
+                    <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                      {"\u4ec5\u91cd\u5efa\u5f53\u524d\u5377\uff0c\u4f1a\u5148\u4fdd\u7559\u5feb\u7167\u5386\u53f2\uff0c\u518d\u628a\u65e7\u6267\u884c\u7ae0\u8282\u5f52\u6863\u66ff\u6362\u4e3a\u5f53\u524d\u62c6\u7ae0\u7ed3\u679c\u3002\u5176\u4ed6\u5377\u4e0d\u53d7\u5f71\u54cd\u3002"}
                     </div>
 
                     <div className="flex flex-wrap gap-2">

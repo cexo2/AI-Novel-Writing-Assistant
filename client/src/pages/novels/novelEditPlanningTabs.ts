@@ -142,7 +142,9 @@ interface BuildNovelEditPlanningTabsInput {
   syncOptions: VolumeSyncOptions;
   onSyncOptionsChange: (patch: Partial<VolumeSyncOptions>) => void;
   onApplySync: (options: { preserveContent: boolean; applyDeletes: boolean }) => void;
+  onRebuildVolumeSync: (volumeId: string) => void;
   isApplyingSync: boolean;
+  isRebuildingVolumeSync: boolean;
   syncMessage: string;
   chapters: ExistingOutlineChapter[];
   onChapterFieldChange: StructuredTabViewProps["onChapterFieldChange"];
@@ -279,7 +281,9 @@ export function buildNovelEditPlanningTabs(input: BuildNovelEditPlanningTabsInpu
     syncOptions: input.syncOptions,
     onSyncOptionsChange: input.onSyncOptionsChange,
     onApplySync: input.onApplySync,
+    onRebuildVolumeSync: input.onRebuildVolumeSync,
     isApplyingSync: input.isApplyingSync,
+    isRebuildingVolumeSync: input.isRebuildingVolumeSync,
     syncMessage: input.syncMessage,
     chapters: input.chapters,
     onChapterFieldChange: input.onChapterFieldChange,

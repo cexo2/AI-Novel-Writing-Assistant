@@ -9,6 +9,7 @@ import {
   formatChapterTaskSheetQualityFailure,
 } from "@ai-novel/shared/types/chapterTaskSheetQuality";
 import { prisma } from "../../../db/prisma";
+import { AppError } from "../../../middleware/errorHandler";
 import type { VolumeUpdateReason } from "../../../events";
 import {
   buildVolumeSyncPlan,
@@ -16,6 +17,7 @@ import {
   type ExistingChapterRecord,
 } from "./volumePlanUtils";
 import type { VolumeSyncInput } from "./volumeModels";
+import { resolveTargetVolumeRebuildCandidates } from "./volumeRebuildTarget";
 import {
   mergeVolumeWorkspaceInput,
   serializeVolumeWorkspaceDocument,
@@ -46,6 +48,114 @@ export interface VolumeChapterSyncOptions {
 export class VolumeChapterSyncService {
   constructor(private readonly deps: VolumeChapterSyncServiceDeps) {}
 
+  private buildTargetVolumeRebuildPreview(params: {
+    targetVolume: VolumePlan;
+    existingChapters: ExistingChapterRecord[];
+    chapterIdsToReplace: string[];
+  }): VolumeSyncPreview {
+    const { targetVolume, existingChapters, chapterIdsToReplace } = params;
+    const existingById = new Map(existingChapters.map((chapter) => [chapter.id, chapter] as const));
+    const deleteItems = chapterIdsToReplace
+      .map((chapterId) => existingById.get(chapterId))
+      .filter((chapter): chapter is ExistingChapterRecord => Boolean(chapter))
+      .sort((left, right) => left.order - right.order)
+      .map((chapter) => ({
+        action: "delete" as const,
+        volumeTitle: targetVolume.title,
+        chapterOrder: chapter.order,
+        nextTitle: chapter.title,
+        previousTitle: chapter.title,
+        hasContent: Boolean(chapter.content?.trim()),
+        changedFields: [],
+      }));
+    const createItems = targetVolume.chapters.map((chapter) => ({
+      action: "create" as const,
+      volumeTitle: targetVolume.title,
+      chapterOrder: chapter.chapterOrder,
+      nextTitle: chapter.title,
+      previousTitle: "",
+      hasContent: false,
+      changedFields: ["title", "summary", "purpose", "taskSheet"],
+    }));
+
+    return {
+      createCount: targetVolume.chapters.length,
+      updateCount: 0,
+      keepCount: 0,
+      moveCount: 0,
+      deleteCount: chapterIdsToReplace.length,
+      deleteCandidateCount: chapterIdsToReplace.length,
+      affectedGeneratedCount: deleteItems.filter((item) => item.hasContent).length,
+      clearContentCount: 0,
+      affectedVolumeCount: 1,
+      items: [...deleteItems, ...createItems],
+    };
+  }
+
+  private async assertTargetVolumeRebuildIsIdle(params: {
+    novelId: string;
+    targetVolume: VolumePlan;
+    chapterIdsToReplace: string[];
+    minChapterOrder: number;
+    maxChapterOrder: number;
+  }): Promise<void> {
+    const {
+      novelId,
+      targetVolume,
+      chapterIdsToReplace,
+      minChapterOrder,
+      maxChapterOrder,
+    } = params;
+    const [activePipelineJob, activeAutoDirectorTask, generatingChapter] = await Promise.all([
+      prisma.generationJob.findFirst({
+        where: {
+          novelId,
+          status: { in: ["queued", "running"] },
+          startOrder: { lte: maxChapterOrder },
+          endOrder: { gte: minChapterOrder },
+        },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true, startOrder: true, endOrder: true },
+      }),
+      prisma.novelWorkflowTask.findFirst({
+        where: {
+          novelId,
+          lane: "auto_director",
+          status: { in: ["queued", "running", "waiting_approval"] },
+        },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true, title: true },
+      }),
+      prisma.chapter.findFirst({
+        where: {
+          novelId,
+          id: { in: chapterIdsToReplace },
+          chapterStatus: "generating",
+        },
+        select: { id: true, order: true, title: true },
+      }),
+    ]);
+
+    if (activePipelineJob) {
+      throw new AppError(
+        `第${targetVolume.sortOrder}卷正在被章节流水线占用（范围 ${activePipelineJob.startOrder}-${activePipelineJob.endOrder}），请等待当前任务结束后再重建。`,
+        409,
+      );
+    }
+    if (activeAutoDirectorTask) {
+      throw new AppError(
+        `当前小说仍有自动导演任务“${activeAutoDirectorTask.title}”在运行或等待处理，请先结束该任务，再重建本卷章节同步。`,
+        409,
+      );
+    }
+    if (generatingChapter) {
+      throw new AppError(
+        `第${generatingChapter.order}章“${generatingChapter.title}”仍在生成中，请等待该章节空闲后再重建本卷。`,
+        409,
+      );
+    }
+  }
+
   private applyChapterLinks(
     volumes: VolumePlan[],
     links: Array<{ volumeChapterId: string; chapterId: string }>,
@@ -72,6 +182,9 @@ export class VolumeChapterSyncService {
   ): Promise<VolumeSyncPreview> {
     const workspace = await this.deps.ensureVolumeWorkspace(novelId);
     const mergedDocument = mergeVolumeWorkspaceInput(novelId, workspace, { volumes: input.volumes });
+    if (input.syncMode === "rebuild_target_volume") {
+      return this.rebuildTargetVolumeChapters(novelId, workspace, mergedDocument, input, options);
+    }
     this.assertSyncableChapterExecutionContracts(mergedDocument, input.executionContractChapterRange);
     const shouldSyncPayoffLedger = hasPayoffLedgerRelevantPlanChanges(workspace.volumes, mergedDocument.volumes);
     const existingChapters = await prisma.chapter.findMany({
@@ -183,6 +296,154 @@ export class VolumeChapterSyncService {
     return plan.preview;
   }
 
+  private async rebuildTargetVolumeChapters(
+    novelId: string,
+    workspace: VolumePlanDocument,
+    mergedDocument: VolumePlanDocument,
+    input: VolumeSyncInput,
+    options: VolumeChapterSyncOptions,
+  ): Promise<VolumeSyncPreview> {
+    const targetVolumeId = input.targetVolumeId?.trim();
+    if (!targetVolumeId) {
+      throw new AppError("重建本卷章节同步缺少目标卷。", 400);
+    }
+    const targetVolume = mergedDocument.volumes.find((volume) => volume.id === targetVolumeId);
+    if (!targetVolume) {
+      throw new AppError("目标卷不存在，无法重建本卷章节同步。", 404);
+    }
+    const startOrder = targetVolume.chapters[0]?.chapterOrder;
+    const endOrder = targetVolume.chapters[targetVolume.chapters.length - 1]?.chapterOrder;
+    if (typeof startOrder === "number" && typeof endOrder === "number") {
+      this.assertSyncableChapterExecutionContracts(mergedDocument, {
+        startOrder,
+        endOrder,
+      });
+    }
+
+    const existingChapters = await prisma.chapter.findMany({
+      where: { novelId },
+      orderBy: { order: "asc" },
+      select: {
+        id: true,
+        order: true,
+        title: true,
+        content: true,
+        generationState: true,
+        chapterStatus: true,
+        expectation: true,
+        targetWordCount: true,
+        conflictLevel: true,
+        revealLevel: true,
+        mustAvoid: true,
+        taskSheet: true,
+        sceneCards: true,
+      },
+    });
+    const replacement = resolveTargetVolumeRebuildCandidates({
+      previousVolumes: workspace.volumes,
+      nextVolumes: mergedDocument.volumes,
+      targetVolumeId,
+      existingChapters: existingChapters as ExistingChapterRecord[],
+    });
+    await this.assertTargetVolumeRebuildIsIdle({
+      novelId,
+      targetVolume,
+      chapterIdsToReplace: replacement.chapterIdsToReplace,
+      minChapterOrder: replacement.minChapterOrder,
+      maxChapterOrder: replacement.maxChapterOrder,
+    });
+
+    const shouldSyncPayoffLedger = hasPayoffLedgerRelevantPlanChanges(workspace.volumes, mergedDocument.volumes);
+    const preview = this.buildTargetVolumeRebuildPreview({
+      targetVolume,
+      existingChapters: existingChapters as ExistingChapterRecord[],
+      chapterIdsToReplace: replacement.chapterIdsToReplace,
+    });
+
+    await runVolumeWorkspaceTransaction(async (tx) => {
+      const { versionId } = await this.deps.ensureActiveVersionRecord(tx, novelId, mergedDocument);
+      if (replacement.chapterIdsToReplace.length > 0) {
+        await tx.storyPlan.updateMany({
+          where: {
+            novelId,
+            level: "chapter",
+            chapterId: { in: replacement.chapterIdsToReplace },
+          },
+          data: {
+            status: "stale",
+            chapterId: null,
+          },
+        });
+        await tx.chapter.deleteMany({
+          where: {
+            novelId,
+            id: { in: replacement.chapterIdsToReplace },
+          },
+        });
+      }
+
+      const linkedVolumes = mergedDocument.volumes.map((volume) => {
+        if (volume.id !== targetVolumeId) {
+          return volume;
+        }
+        return {
+          ...volume,
+          chapters: volume.chapters.map((chapter) => ({
+            ...chapter,
+            chapterId: null,
+          })),
+        };
+      });
+
+      const rebuiltTargetChapters: Array<{ volumeChapterId: string; chapterId: string }> = [];
+      for (const chapter of targetVolume.chapters) {
+        const created = await tx.chapter.create({
+          data: {
+            novelId,
+            title: chapter.title,
+            order: chapter.chapterOrder,
+            content: "",
+            expectation: chapter.purpose?.trim() || chapter.summary,
+            targetWordCount: chapter.targetWordCount ?? null,
+            conflictLevel: chapter.conflictLevel ?? null,
+            revealLevel: chapter.revealLevel ?? null,
+            mustAvoid: chapter.mustAvoid ?? null,
+            taskSheet: chapter.taskSheet?.trim() || null,
+            sceneCards: chapter.sceneCards ?? null,
+            generationState: "planned",
+            chapterStatus: "unplanned",
+          },
+        });
+        rebuiltTargetChapters.push({
+          volumeChapterId: chapter.id,
+          chapterId: created.id,
+        });
+      }
+
+      const linkedDocument = {
+        ...mergedDocument,
+        volumes: this.applyChapterLinks(linkedVolumes, rebuiltTargetChapters),
+        activeVersionId: versionId,
+        source: "volume" as const,
+      };
+      await tx.volumePlanVersion.update({
+        where: { id: versionId },
+        data: {
+          contentJson: serializeVolumeWorkspaceDocument(linkedDocument),
+        },
+      });
+      await persistActiveVolumeWorkspace(tx, novelId, linkedDocument, versionId);
+    });
+
+    if (options.emitEvent !== false) {
+      this.deps.emitVolumeUpdated(novelId, options.volumeUpdateReason ?? "chapter_sync");
+    }
+    if (options.syncPayoffLedger ?? shouldSyncPayoffLedger) {
+      this.deps.syncPayoffLedger(novelId);
+    }
+    return preview;
+  }
+
   private assertSyncableChapterExecutionContracts(
     document: VolumePlanDocument,
     chapterRange?: VolumeSyncInput["executionContractChapterRange"],
@@ -219,7 +480,7 @@ export class VolumeChapterSyncService {
           sceneCards: chapter.sceneCards,
         });
         if (!result.canEnterExecution) {
-          throw new Error(`第 ${chapter.chapterOrder} 章执行合同未通过质量门禁，不能连接到章节执行区。${formatChapterTaskSheetQualityFailure(result)}`);
+          throw new Error(`\u7b2c ${chapter.chapterOrder} \u7ae0\u6267\u884c\u5408\u540c\u672a\u901a\u8fc7\u8d28\u91cf\u95e8\u7981\uff0c\u4e0d\u80fd\u8fde\u63a5\u5230\u7ae0\u8282\u6267\u884c\u533a\u3002${formatChapterTaskSheetQualityFailure(result)}`);
         }
       }
     }
